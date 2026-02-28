@@ -1,7 +1,17 @@
-def main():
+from fastapi import FastAPI
 
-    print("Hello from deep-research-engine!")
+from src.research.controller import router as research_router
+
+app = FastAPI()
+
+app.include_router(research_router)
 
 
-if __name__ == "__main__":
-    main()
+@app.get("/")
+def root():
+    return {"message": "Hello from deep-research-engine!"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

@@ -4,4 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "deepagents>=0.4.4",
+    "fastapi[standard]>=0.134.0",
+    "langchain>=1.2.10",
+    "langchain-google-genai>=4.2.1",
+]
