@@ -4,8 +4,9 @@ from typing import AsyncGenerator
 
 from deepagents import create_deep_agent
 from dotenv import load_dotenv
-from langgraph.checkpoint.memory import InMemorySaver
 from langchain.chat_models import init_chat_model
+
+from src.research.checkpointer import get_checkpointer
 
 load_dotenv()
 
@@ -13,7 +14,7 @@ _base_agent = None
 _agent_lock = asyncio.Lock()
 
 
-def _build_agent():
+def _build_agent(checkpointer):
     chat_model = init_chat_model(
         model="gemini-3-flash-preview",
         model_provider="google_genai",
@@ -32,7 +33,6 @@ def _build_agent():
             "api_key",
         ),
     )
-    checkpointer = InMemorySaver()
     return create_deep_agent(model=chat_model, checkpointer=checkpointer)
 
 
@@ -41,9 +41,9 @@ async def get_base_agent():
     global _base_agent
     if _base_agent is None:
         async with _agent_lock:
-            # Double-checked locking — re-check after acquiring the lock
             if _base_agent is None:
-                _base_agent = _build_agent()
+                checkpointer = await get_checkpointer()
+                _base_agent = _build_agent(checkpointer)
     return _base_agent
 
 

@@ -9,4 +9,8 @@ dependencies = [
     "fastapi[standard]>=0.134.0",
     "langchain>=1.2.10",
     "langchain-google-genai>=4.2.1",
+    "langgraph-checkpoint-postgres>=3.0.4",
+    "psycopg[async,binary]>=3.3.3",
+    "sqlacodegen>=4.0.2",
+    "sqlalchemy>=2.0.48",
 ]
