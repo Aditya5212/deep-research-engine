@@ -7,10 +7,14 @@ requires-python = ">=3.12"
 dependencies = [
     "deepagents>=0.4.4",
     "fastapi[standard]>=0.134.0",
+    "fastmcp[tasks]>=3.1.0",
     "langchain>=1.2.10",
     "langchain-google-genai>=4.2.1",
+    "langchain-mcp-adapters>=0.2.1",
     "langgraph-checkpoint-postgres>=3.0.4",
     "psycopg[async,binary]>=3.3.3",
+    "python-dotenv>=1.2.1",
     "sqlacodegen>=4.0.2",
     "sqlalchemy>=2.0.48",
+    "tavily-python>=0.7.22",
 ]
