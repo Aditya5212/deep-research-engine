@@ -7,11 +7,12 @@ from deepagents import create_deep_agent
 from dotenv import load_dotenv
 from fastmcp import Client as FastMCPClient
 from langchain.agents.middleware import InterruptOnConfig
-from langchain.chat_models import init_chat_model
+from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from src.research.checkpointer import get_checkpointer
 from src.tavily_mcp_server import mcp as tavily_mcp
+from src.research.delegate_tool import delegate_research_task
 
 load_dotenv()
 
@@ -40,29 +41,43 @@ HITL_INTERRUPT_ON: dict[str, bool | InterruptOnConfig] = {
         allowed_decisions=["approve", "edit", "reject"],
         description="🕷️ Website crawl requested. Review the target URL and scope before proceeding.",
     ),
+    "delegate_research_task": InterruptOnConfig(
+        allowed_decisions=["approve", "edit", "reject"],
+        description="📚 Deep multi-agent domain research requested. This will spawn a parallel A2A agent to extensively research the sub-question.",
+    ),
 }
 
 
 async def _build_agent(checkpointer):
     global _fastmcp_client
 
-    chat_model = init_chat_model(
-        model="gemini-3-flash-preview",
-        model_provider="google_genai",
-        streaming=True,
-        temperature=0.5,
-        timeout=300,
-        max_tokens=8000,
-        configurable_fields=(
-            "model",
-            "model_provider",
-            "streaming",
-            "temperature",
-            "timeout",
-            "max_tokens",
-            "base_url",
-            "api_key",
-        ),
+    # Previous Google Gemini config (commented out for NVIDIA switch)
+    # chat_model = init_chat_model(
+    #     model="gemini-3-flash-preview",
+    #     model_provider="google_genai",
+    #     streaming=True,
+    #     temperature=0.5,
+    #     timeout=300,
+    #     max_tokens=8000,
+    #     configurable_fields=(
+    #         "model",
+    #         "model_provider",
+    #         "streaming",
+    #         "temperature",
+    #         "timeout",
+    #         "max_tokens",
+    #         "base_url",
+    #         "api_key",
+    #     ),
+    # )
+
+    chat_model = ChatOpenAI(
+        model="moonshotai/kimi-k2-instruct",
+        api_key=os.getenv("NVIDIA_API_KEY"),
+        base_url="https://integrate.api.nvidia.com/v1",
+        temperature=0.6,
+        top_p=0.9,
+        max_completion_tokens=16384,
     )
 
     # In-process FastMCP client — connects directly to the FastMCP instance
@@ -71,6 +86,11 @@ async def _build_agent(checkpointer):
     _fastmcp_client = FastMCPClient(tavily_mcp)
     await _fastmcp_client.__aenter__()
     tools = await load_mcp_tools(_fastmcp_client.session)
+    # tavily_research is a high-level Tavily AI report — excluded because:
+    # 1. Its schema (input/model/stream) conflicts with how the LLM expects search tools to work
+    # 2. The agent does its own multi-step research using tavily_search directly
+    tools = [t for t in tools if t.name != "tavily_research"]
+    tools.append(delegate_research_task)
 
     return create_deep_agent(
         model=chat_model,

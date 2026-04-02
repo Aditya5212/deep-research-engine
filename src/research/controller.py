@@ -49,11 +49,20 @@ class InterruptValue(BaseModel):
     value: HITLRequestValue
 
 
+class RunMetadata(BaseModel):
+    """Execution metadata collected from the agent run via LangChain callbacks."""
+    usage: dict[str, Any] = {}       # input_tokens, output_tokens, total_tokens
+    llm_calls: int = 0               # number of LLM inference steps
+    tool_calls: list[dict[str, Any]] = []  # per-tool: name, input, elapsed_s, error
+    elapsed_s: float = 0.0           # total wall-clock seconds for the run
+
+
 class ChatResponse(BaseModel):
     reply: str | None = None
     thread_id: str
     interrupted: bool = False
     interrupts: list[InterruptValue] = []
+    metadata: RunMetadata = RunMetadata()
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +127,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         thread_id=request.thread_id,
         interrupted=result["interrupted"],
         interrupts=[InterruptValue(**i) for i in result["interrupts"]],
+        metadata=RunMetadata(**result.get("metadata", {})),
     )
 
 
@@ -157,6 +167,7 @@ async def session_resume(thread_id: str, body: ResumeRequest) -> ChatResponse:
         thread_id=thread_id,
         interrupted=result["interrupted"],
         interrupts=[InterruptValue(**i) for i in result["interrupts"]],
+        metadata=RunMetadata(**result.get("metadata", {})),
     )
 
 
