@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import traceback
 import uuid
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -98,74 +99,101 @@ class ResearchAgentExecutor(AgentExecutor):
         #             findings = msg.content
         # -----------------------------------------------------------------------
 
-        logger.info("[TASK:%s] Opening researcher_agent_context domain=%s", task_id, domain)
-        async with researcher_agent_context(domain=domain) as agent:
-            logger.debug("[TASK:%s] Agent ready — calling ainvoke", task_id)
-            result = await agent.ainvoke(
-                {"messages": [{"role": "user", "content": sub_question}]},
-                config={
-                    "configurable": {
-                        # thread_id scopes the checkpoint to this conversation context.
-                        # Using context_id groups all turns in the same session;
-                        # use task_id here instead if you want per-task isolation.
-                        "thread_id": context_id,
-                    }
-                },
-            )
-            # Extract final AI message content from the returned state
-            messages = result.get("messages", [])
-            for msg in reversed(messages):
-                if getattr(msg, "content", None) and not getattr(msg, "tool_calls", None):
-                    findings = msg.content
-                    break
-
-        elapsed = time.perf_counter() - t_start
-        logger.info(
-            "[TASK:%s] ainvoke complete | elapsed=%.2fs | findings=%s",
-            task_id, elapsed, findings is not None,
-        )
-
-        # ── Parse findings ─────────────────────────────────────────────────────
         try:
-            parsed = json.loads(findings) if isinstance(findings, str) else {}
-            logger.debug("[TASK:%s] Parsed findings as JSON successfully", task_id)
+            logger.info("[TASK:%s] Opening researcher_agent_context domain=%s", task_id, domain)
+            async with researcher_agent_context(domain=domain) as agent:
+                logger.debug("[TASK:%s] Agent ready — calling ainvoke", task_id)
+                result = await agent.ainvoke(
+                    {"messages": [{"role": "user", "content": sub_question}]},
+                    config={
+                        "configurable": {
+                            # thread_id scopes the checkpoint to this conversation context.
+                            # Using context_id groups all turns in the same session;
+                            # use task_id here instead if you want per-task isolation.
+                            "thread_id": context_id,
+                        }
+                    },
+                )
+                # Extract final AI message content from the returned state
+                messages = result.get("messages", [])
+                for msg in reversed(messages):
+                    if getattr(msg, "content", None) and not getattr(msg, "tool_calls", None):
+                        findings = msg.content
+                        break
+
+            elapsed = time.perf_counter() - t_start
+            logger.info(
+                "[TASK:%s] ainvoke complete | elapsed=%.2fs | findings=%s",
+                task_id, elapsed, findings is not None,
+            )
+
+            # ── Parse findings ─────────────────────────────────────────────────
+            try:
+                parsed = json.loads(findings) if isinstance(findings, str) else {}
+                logger.debug("[TASK:%s] Parsed findings as JSON successfully", task_id)
+            except (json.JSONDecodeError, TypeError) as parse_exc:
+                logger.warning(
+                    "[TASK:%s] JSON parse failed (%s) — using raw string", task_id, parse_exc
+                )
+                parsed = {
+                    "findings": str(findings),
+                    "citations": [],
+                    "confidence": "low",
+                    "identified_gaps": [],
+                }
+
+            # ── Enqueue: artifact (final structured result) ────────────────────
+            artifact_id = uuid.uuid4().hex
+            logger.info("[TASK:%s] Enqueuing TaskArtifactUpdateEvent (artifact_id=%s)", task_id, artifact_id)
+            await event_queue.enqueue_event(
+                TaskArtifactUpdateEvent(
+                    task_id=task_id,
+                    context_id=context_id,
+                    artifact=Artifact(
+                        artifact_id=artifact_id,
+                        name="research_findings",
+                        parts=[Part(root=DataPart(data=parsed))],
+                    ),
+                    last_chunk=True,
+                )
+            )
+
+            # ── Enqueue: completed ─────────────────────────────────────────────
+            logger.info("[TASK:%s] Enqueuing TaskState.completed", task_id)
+            await event_queue.enqueue_event(
+                _status_event(
+                    task_id, context_id, TaskState.completed,
+                    f"[{domain}] Complete | {elapsed:.2f}s",
+                    final=True,
+                )
+            )
+            logger.info("[TASK:%s] <<< Execute finished", task_id)
+
         except Exception as exc:
-            logger.warning(
-                "[TASK:%s] JSON parse failed (%s) — using raw string", task_id, exc
+            elapsed = time.perf_counter() - t_start
+            logger.error(
+                "[TASK:%s] Unhandled exception | domain=%s | elapsed=%.2fs | %s: %s\n%s",
+                task_id, domain, elapsed,
+                type(exc).__name__, exc,
+                traceback.format_exc(),
             )
-            parsed = {
-                "findings": str(findings),
-                "citations": [],
-                "confidence": "low",
-                "identified_gaps": [],
-            }
-
-        # ── Enqueue: artifact (final structured result) ────────────────────────
-        artifact_id = uuid.uuid4().hex
-        logger.info("[TASK:%s] Enqueuing TaskArtifactUpdateEvent (artifact_id=%s)", task_id, artifact_id)
-        await event_queue.enqueue_event(
-            TaskArtifactUpdateEvent(
-                task_id=task_id,
-                context_id=context_id,
-                artifact=Artifact(
-                    artifact_id=artifact_id,
-                    name="research_findings",
-                    parts=[Part(root=DataPart(data=parsed))],
-                ),
-                last_chunk=True,
-            )
-        )
-
-        # ── Enqueue: completed ─────────────────────────────────────────────────
-        logger.info("[TASK:%s] Enqueuing TaskState.completed", task_id)
-        await event_queue.enqueue_event(
-            _status_event(
-                task_id, context_id, TaskState.completed,
-                f"[{domain}] Complete | {elapsed:.2f}s",
-                final=True,
-            )
-        )
-        logger.info("[TASK:%s] <<< Execute finished", task_id)
+            try:
+                await event_queue.enqueue_event(
+                    _status_event(
+                        task_id, context_id, TaskState.failed,
+                        json.dumps({
+                            "error": type(exc).__name__,
+                            "message": str(exc),
+                            "domain": domain,
+                            "elapsed_s": round(elapsed, 2),
+                        }),
+                        final=True,
+                    )
+                )
+            except Exception as eq_exc:
+                logger.error(
+                    "[TASK:%s] Failed to enqueue error event: %s", task_id, eq_exc
+                )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         task_id = context.task_id or "unknown"

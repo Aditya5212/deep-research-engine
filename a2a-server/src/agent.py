@@ -1,5 +1,6 @@
 import os
 import logging
+import traceback
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
@@ -85,39 +86,68 @@ Always return structured output:
     global _fastmcp_client
     if _fastmcp_client is None:
         logger.info("[MCP] No active client — initializing FastMCPClient")
-        _fastmcp_client = FastMCPClient(tavily_mcp)
-        await _fastmcp_client.__aenter__()
-        logger.info("[MCP] FastMCPClient initialized and session opened")
+        try:
+            _fastmcp_client = FastMCPClient(tavily_mcp)
+            await _fastmcp_client.__aenter__()
+            logger.info("[MCP] FastMCPClient initialized and session opened")
+        except Exception as exc:
+            _fastmcp_client = None
+            logger.error(
+                "[MCP] FastMCPClient initialization failed: %s: %s\n%s",
+                type(exc).__name__, exc, traceback.format_exc(),
+            )
+            raise RuntimeError(f"MCP server initialization failed: {exc}") from exc
     else:
         logger.debug("[MCP] Reusing existing FastMCPClient session")
 
     # Pass the underlying MCP ClientSession — load_mcp_tools expects ClientSession,
     # not the FastMCP Client wrapper. FastMCP Client.session is the raw MCP session.
-    tools = await load_mcp_tools(_fastmcp_client.session)
-    logger.info(
-        "[MCP] Loaded %d tools from Tavily MCP server: %s",
-        len(tools),
-        [t.name for t in tools],
-    )
+    try:
+        tools = await load_mcp_tools(_fastmcp_client.session)
+        logger.info(
+            "[MCP] Loaded %d tools from Tavily MCP server: %s",
+            len(tools),
+            [t.name for t in tools],
+        )
+    except Exception as exc:
+        logger.error(
+            "[MCP] load_mcp_tools failed: %s: %s\n%s",
+            type(exc).__name__, exc, traceback.format_exc(),
+        )
+        raise RuntimeError(f"Failed to load MCP tools: {exc}") from exc
 
     # Initialize checkpointer (shared singleton). Deployment note: when deploying,
     # use a different checkpointer instance/config for production environments.
     # Logged timestamp below records when this agent initialized the checkpointer.
-    checkpointer = await get_checkpointer()
-    _CHECKPOINT_INIT_TIME = datetime.now(UTC).isoformat()
-    logger.info("[CHECKPOINTER] initialized_at=%s", _CHECKPOINT_INIT_TIME)
+    try:
+        checkpointer = await get_checkpointer()
+        _CHECKPOINT_INIT_TIME = datetime.now(UTC).isoformat()
+        logger.info("[CHECKPOINTER] initialized_at=%s", _CHECKPOINT_INIT_TIME)
+    except Exception as exc:
+        logger.error(
+            "[CHECKPOINTER] Initialization failed: %s: %s\n%s",
+            type(exc).__name__, exc, traceback.format_exc(),
+        )
+        raise RuntimeError(f"Checkpointer initialization failed: {exc}") from exc
 
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=system_prompt,
-        middleware=[ToolLoggingMiddleware()],
-        checkpointer=checkpointer,
-    )
+    try:
+        agent = create_agent(
+            model=model,
+            tools=tools,
+            system_prompt=system_prompt,
+            middleware=[ToolLoggingMiddleware()],
+            checkpointer=checkpointer,
+        )
+        logger.info(
+            "[AGENT] create_agent complete for domain=%s | tools=%d", domain, len(tools)
+        )
+    except Exception as exc:
+        logger.error(
+            "[AGENT] create_agent failed for domain=%s: %s: %s\n%s",
+            domain, type(exc).__name__, exc, traceback.format_exc(),
+        )
+        raise RuntimeError(f"Agent creation failed for domain={domain}: {exc}") from exc
 
-    logger.info(
-        "[AGENT] create_agent complete for domain=%s | tools=%d", domain, len(tools)
-    )
     return agent
 
 
