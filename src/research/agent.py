@@ -1,16 +1,19 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import Annotated, AsyncGenerator
 
-from deepagents import create_deep_agent
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
+from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedState
 from dotenv import load_dotenv
 from fastmcp import Client as FastMCPClient
-from langchain.agents.middleware import InterruptOnConfig
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from src.research.checkpointer import get_checkpointer
+from src.research.state import ResearchAgentState
 from src.tavily_mcp_server import mcp as tavily_mcp
 from src.research.delegate_tool import delegate_research_task
 
@@ -20,30 +23,90 @@ _base_agent = None
 _fastmcp_client: FastMCPClient | None = None
 _agent_lock = asyncio.Lock()
 
+
 # ---------------------------------------------------------------------------
-# Human-in-the-Loop configuration
+# Delegated-tasks inspection tool
 # ---------------------------------------------------------------------------
-# Tools that require human approval before execution.
-# - tavily_research : comprehensive multi-source research (expensive, high-impact)
-# - tavily_extract  : fetches content from explicit URLs (privacy/cost concern)
-# - tavily_crawl    : broad website crawl (expensive, may touch sensitive paths)
-# tavily_search and tavily_map are auto-approved (low-risk, cheap).
+
+@tool("list_delegated_tasks")
+def list_delegated_tasks(
+    state: Annotated[ResearchAgentState, InjectedState],
+) -> dict:
+    """
+    Return all research tasks delegated to A2A sub-agents in this session.
+
+    Output is a dict keyed by A2A task_id:
+        {
+          "<task_id>": {
+            "sub_question":   str,   # the question sent to the sub-agent
+            "domain":         str,   # finance | medical | tech | legal | general
+            "context_id":     str,   # A2A thread_id reused for this domain
+            "confidence":     str,   # high | medium | low
+            "delegated_at":   str,   # ISO-8601 UTC timestamp
+          },
+          ...
+        }
+
+    Use this to check what sub-research has already been done before deciding
+    whether to delegate again or synthesize from existing findings.
+    """
+    return state.get("delegated_tasks") or {}
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator system prompt
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """You are a deep research orchestrator. Your role is to answer complex questions by:
+1. Decomposing the question into focused sub-questions per domain (finance, medical, tech, legal, general)
+2. Delegating each sub-question to a specialized domain researcher via delegate_research_task
+3. Synthesizing all returned findings into a comprehensive, cited answer
+
+## Managing research threads
+
+Each call to delegate_research_task runs on an A2A sub-agent thread identified by a context_id.
+You control which thread handles each request. Always call list_delegated_tasks first to see
+all existing threads and their context_ids before deciding.
+
+Decision rules for context_id:
+
+- **New topic / isolated research** → omit context_id (or pass None).
+  The tool creates a fresh thread. Use this when the sub-question is genuinely new and
+  should not be influenced by any prior search history.
+
+- **Dig deeper into existing research** → pass the context_id of an existing task entry.
+  The same sub-agent resumes with full memory of its prior searches. Use this when you
+  need more detail on something already partially researched.
+
+- **Same domain, different angle** → create a new thread (omit context_id) if the new
+  question is distinct enough that prior context would confuse the sub-agent; reuse the
+  existing thread if the prior context is relevant background.
+
+## Other guidelines
+- Always cite sources from the citations list in your final answer
+- Cross-validate claims that appear across multiple domain findings
+- Flag remaining gaps or contradictions explicitly in your synthesis
+"""
+
+# ---------------------------------------------------------------------------
+# Human-in-the-Loop policy
+# ---------------------------------------------------------------------------
+# delegate_research_task  — spawns an A2A sub-agent (high-impact, irreversible)
+# tavily_extract          — fetches explicit URLs (privacy / cost concern)
+# tavily_crawl            — broad crawl (expensive, may touch sensitive paths)
+# tavily_search / map     — cheap read-only lookups; auto-approved (not listed)
 HITL_INTERRUPT_ON: dict[str, bool | InterruptOnConfig] = {
-    "tavily_research": InterruptOnConfig(
+    "delegate_research_task": InterruptOnConfig(
         allowed_decisions=["approve", "edit", "reject"],
-        description="Comprehensive research task requested. Review the query before proceeding.",
+        description="Domain research sub-task requested. Review the sub-question and domain before spawning the A2A agent.",
     ),
     "tavily_extract": InterruptOnConfig(
         allowed_decisions=["approve", "edit", "reject"],
-        description="🌐 URL extraction requested. Review the target URLs before proceeding.",
+        description="URL extraction requested. Review the target URLs before proceeding.",
     ),
     "tavily_crawl": InterruptOnConfig(
         allowed_decisions=["approve", "edit", "reject"],
-        description="🕷️ Website crawl requested. Review the target URL and scope before proceeding.",
-    ),
-    "delegate_research_task": InterruptOnConfig(
-        allowed_decisions=["approve", "edit", "reject"],
-        description="📚 Deep multi-agent domain research requested. This will spawn a parallel A2A agent to extensively research the sub-question.",
+        description="Website crawl requested. Review the target URL and scope before proceeding.",
     ),
 }
 
@@ -91,12 +154,15 @@ async def _build_agent(checkpointer):
     # 2. The agent does its own multi-step research using tavily_search directly
     tools = [t for t in tools if t.name != "tavily_research"]
     tools.append(delegate_research_task)
+    tools.append(list_delegated_tasks)
 
-    return create_deep_agent(
+    return create_agent(
         model=chat_model,
         tools=tools,
         checkpointer=checkpointer,
-        interrupt_on=HITL_INTERRUPT_ON,
+        state_schema=ResearchAgentState,
+        system_prompt=SYSTEM_PROMPT,
+        middleware=[HumanInTheLoopMiddleware(interrupt_on=HITL_INTERRUPT_ON)],
     )
 
 
