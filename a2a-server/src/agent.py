@@ -11,12 +11,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, UTC
 from config import settings
 from src.app_logger import get_logger
-from src.tavily_mcp_server import mcp as tavily_mcp
 from fastmcp import Client as FastMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from src.research.checkpointer import get_checkpointer
 
 load_dotenv()
+
+# Standalone MCP server URL — set MCP_SERVER_URL in .env to override.
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8001/mcp")
 
 
 logger = get_logger("a2a.agent")
@@ -85,11 +87,11 @@ Always return structured output:
 
     global _fastmcp_client
     if _fastmcp_client is None:
-        logger.info("[MCP] No active client — initializing FastMCPClient")
+        logger.info("[MCP] No active client — connecting to %s", MCP_SERVER_URL)
         try:
-            _fastmcp_client = FastMCPClient(tavily_mcp)
+            _fastmcp_client = FastMCPClient(MCP_SERVER_URL)
             await _fastmcp_client.__aenter__()
-            logger.info("[MCP] FastMCPClient initialized and session opened")
+            logger.info("[MCP] FastMCPClient connected to standalone MCP server")
         except Exception as exc:
             _fastmcp_client = None
             logger.error(
