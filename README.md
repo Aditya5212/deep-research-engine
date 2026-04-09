@@ -1,159 +1,175 @@
 # Deep Research Engine
 
-A FastAPI-based research engine with integrated MCP (Model Context Protocol) servers.
+Multi-service research system built around **three servers**:
 
-## Features
+1. **MCP Server** — Tavily tools exposed over Streamable HTTP
+2. **A2A Server** — remote domain research agent (cloud-ready)
+3. **Main Orchestrator** — FastAPI app that handles user queries, HITL, and delegates work
 
-- **Research Service**: Core research functionality with agent-based processing
-- **MCP Server**: Standard MCP server with sample tools and resources
-- **Tavily MCP Server**: Complete integration with Tavily API for web search, content extraction, crawling, and research
+---
 
-## Installation
+## Architecture
 
-1. Install dependencies using uv:
-```bash
-uv sync
+```
+User / UI
+  ↓
+Main Orchestrator (FastAPI, :8000)
+  ├── direct MCP tools (tavily_search/extract/crawl/map)
+  └── delegate_research_task → A2A Server (domain agent)
+                                   └── uses MCP Server for Tavily tools
+MCP Server (FastMCP, :8001)
 ```
 
-2. Copy the environment variables template:
+## Why this architecture
+
+- **Isolation**: MCP and A2A run in their own processes with separate deps and configs.
+- **Scalability**: A2A can scale independently for heavy research workloads.
+- **Cost control**: MCP traffic is centralized and observable; A2A can be throttled.
+- **Failure containment**: MCP outages do not crash the orchestrator; failures are localized.
+- **Deployment flexibility**: A2A can run on remote/cloud hosts, MCP can run close to Tavily.
+- **Faster iteration**: Each service can be updated/redeployed without restarting the whole system.
+
+### Server responsibilities
+
+**1) MCP Server (mcp-server)**
+- Standalone Tavily MCP server
+- Exposes tools over Streamable HTTP
+- Runs on `http://localhost:8001/mcp`
+
+**2) A2A Server (a2a-server)**
+- Hosts the domain researcher agent
+- Uses MCP tools over HTTP (`MCP_SERVER_URL`)
+- Exposes A2A endpoint at `/agent`
+- Intended to run as a separate service in cloud or on another machine
+
+**3) Main Orchestrator (root main.py)**
+- FastAPI app for `/research/*` endpoints and HITL flows
+- Delegates sub-questions to A2A via `AGENT_URL`
+- Also calls MCP tools directly for quick lookups
+
+---
+
+## Requirements
+
+- Python ≥ 3.12
+- [uv](https://docs.astral.sh/uv/) package manager
+- Docker (for Postgres via `docker compose`)
+
+---
+
+## Setup
+
+### 1) Main orchestrator
 ```bash
+uv sync
 cp .env.example .env
 ```
 
-3. Configure your environment variables in `.env`:
-   - `GOOGLE_API_KEY`: Your Google API key for research services
-   - `TAVILY_API_KEY`: Your Tavily API key (get it at https://tavily.com)
-   - Database credentials for PostgreSQL
+Set in `.env`:
+```
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=deep_research
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
 
-## Running the Server
+AGENT_URL=http://localhost:8000/agent/
+MCP_SERVER_URL=http://localhost:8001/mcp
+```
 
-Start the FastAPI server:
+### 2) MCP server
 ```bash
-uvicorn main:app --reload
+cd mcp-server
+cp .env.example .env
+uv sync
 ```
 
-The server will be available at:
-- Main API: http://localhost:8000
-- MCP Server: http://localhost:8000/mcp
-- Tavily MCP Server: http://localhost:8000/tavily
-- API Docs: http://localhost:8000/docs
-
-## MCP Servers
-
-### Standard MCP Server (http://localhost:8000/mcp)
-
-Sample tools for demonstration:
-- `research_status`: Get the status of a research task
-- `list_research_tasks`: List all research tasks
-
-### Tavily MCP Server (http://localhost:8000/tavily)
-
-Complete Tavily API integration with the following tools:
-
-#### tavily_search
-Search the web for current information with advanced options:
-- **search_depth**: `basic`, `advanced`, `fast`, `ultra-fast`
-- **time_range**: Filter by `day`, `week`, `month`, `year`
-- **date filtering**: Use `start_date` and `end_date` (YYYY-MM-DD)
-- **domain filtering**: Include or exclude specific domains
-- **max_results**: 5-20 results
-- **include_images**: Get related images
-- **country**: Boost results from specific countries
-
-Example:
-```python
-{
-    "query": "latest AI developments",
-    "search_depth": "advanced",
-    "max_results": 10,
-    "include_images": true,
-    "time_range": "week"
-}
+### 3) A2A server
+```bash
+cd a2a-server
+cp .env.example .env
+uv sync
 ```
 
-#### tavily_extract
-Extract and parse content from URLs:
-- **extract_depth**: `basic` or `advanced` (for tables, embedded content)
-- **format**: `markdown` or `text`
-- **query**: Rerank content by relevance
+---
 
-Example:
-```python
-{
-    "urls": ["https://example.com/article"],
-    "extract_depth": "advanced",
-    "format": "markdown"
-}
+## Running the stack (local)
+
+### Start Postgres
+```bash
+docker compose up -d
 ```
 
-#### tavily_crawl
-Crawl websites with depth and breadth control:
-- **max_depth**: How deep to crawl from the base URL
-- **max_breadth**: Links to follow per page
-- **limit**: Total links to process
-- **instructions**: Natural language filtering
-- **select_paths**: Regex patterns for path filtering
-- **select_domains**: Domain restrictions
-
-Example:
-```python
-{
-    "url": "https://docs.example.com",
-    "max_depth": 2,
-    "max_breadth": 10,
-    "select_paths": ["/docs/.*"]
-}
+### Start MCP server
+```bash
+cd mcp-server
+uv run start
 ```
 
-#### tavily_map
-Map website structure and discover URLs:
-- Returns list of discovered URLs
-- Same configuration options as crawl
-- Lightweight site analysis
-
-#### tavily_research
-Comprehensive multi-source research:
-- **model**: `mini`, `pro`, or `auto`
-- Returns detailed research synthesis
-- Polls for completion automatically
-
-Example:
-```python
-{
-    "input": "What are the latest developments in quantum computing?",
-    "model": "pro"
-}
+### Start main orchestrator
+```bash
+cd ..
+uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### Resources
+### A2A server
+For local dev, the A2A endpoint is mounted by the main orchestrator at:
 
-- `tavily://status`: Check Tavily API configuration status
+```
+http://localhost:8000/agent
+```
 
-## API Endpoints
+If running A2A separately (recommended for production), start it on its own host/port
+and set `AGENT_URL` in `.env` to that URL. The A2A server should expose `/agent`.
 
-- `GET /`: Welcome message
-- `GET /health`: Health check endpoint
-- Research endpoints: See `/docs` for full API documentation
+---
 
-## Development
+## MCP tools (Tavily)
 
-The project structure:
+These tools are provided by the standalone MCP server and are available to both
+the A2A server and the orchestrator:
+
+- `tavily_search`
+- `tavily_extract`
+- `tavily_crawl`
+- `tavily_map`
+- `tavily_research`
+
+See the full tool reference and examples in [mcp-server/README.md](mcp-server/README.md).
+
+---
+
+## API endpoints (main orchestrator)
+
+- `GET /` — welcome message
+- `GET /health` — health check
+- `POST /research/chat` — main chat endpoint
+- `POST /research/session/{thread_id}/resume` — HITL resume
+- `GET /research/session/{thread_id}/history` — state history
+
+Full API docs at `http://localhost:8000/docs`.
+
+---
+
+## Project structure
+
 ```
 deep-research-engine/
-├── main.py                      # FastAPI application entry point
+├── main.py                    # Orchestrator FastAPI app
 ├── src/
-│   ├── mcp_server.py           # Standard MCP server
-│   ├── tavily_mcp_server.py    # Tavily MCP integration
-│   └── research/               # Research service modules
+│   └── research/               # Orchestrator agent + HITL + delegation
 │       ├── agent.py
-│       ├── checkpointer.py
+│       ├── delegate_tool.py
 │       ├── controller.py
-│       ├── models.py
 │       └── service.py
-├── pyproject.toml              # Project dependencies
-├── docker-compose.yml          # Docker configuration
-└── .env.example                # Environment variables template
+├── a2a-server/                 # Remote domain research agent (A2A)
+├── mcp-server/                 # Standalone Tavily MCP server
+├── pyproject.toml
+├── docker-compose.yml
+└── .env.example
 ```
+
+---
 
 ## License
 

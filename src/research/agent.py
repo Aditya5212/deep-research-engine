@@ -14,10 +14,12 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 from src.research.checkpointer import get_checkpointer
 from src.research.state import ResearchAgentState
-from src.tavily_mcp_server import mcp as tavily_mcp
 from src.research.delegate_tool import delegate_research_task
 
 load_dotenv()
+
+# Standalone MCP server URL — set MCP_SERVER_URL in .env to override.
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8001/mcp")
 
 _base_agent = None
 _fastmcp_client: FastMCPClient | None = None
@@ -143,10 +145,10 @@ async def _build_agent(checkpointer):
         max_completion_tokens=16384,
     )
 
-    # In-process FastMCP client — connects directly to the FastMCP instance
-    # without going through HTTP. The client is reentrant (reference-counted),
-    # so the single open session is reused across all agent invocations.
-    _fastmcp_client = FastMCPClient(tavily_mcp)
+    # HTTP FastMCP client — connects to the standalone mcp-server (:8001).
+    # The client is reentrant (reference-counted), so the single open session
+    # is reused across all agent invocations.
+    _fastmcp_client = FastMCPClient(MCP_SERVER_URL)
     await _fastmcp_client.__aenter__()
     tools = await load_mcp_tools(_fastmcp_client.session)
     # tavily_research is a high-level Tavily AI report — excluded because:

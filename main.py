@@ -14,13 +14,9 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentCapabilities, AgentSkill
 from agent_executor import ResearchAgentExecutor
 
-from src.tavily_mcp_server import mcp as tavily_mcp
 from src.research.agent import close_agent
 from src.research.checkpointer import close_checkpointer
 from src.research.controller import router as research_router
-
-# Build the MCP ASGI app — exposes Streamable HTTP transport at /tavily/mcp
-tavily_mcp_app = tavily_mcp.http_app(path="/mcp")
 
 # --- Initialize A2A Agent Server ---
 research_skill = AgentSkill(
@@ -57,20 +53,15 @@ a2a_app = A2AStarletteApplication(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start all inner lifespans alongside FastAPI
     async with a2a_app.router.lifespan_context(app):
-        async with tavily_mcp_app.lifespan(app):
-            yield
-            await close_agent()
-            await close_checkpointer()
+        yield
+        await close_agent()
+        await close_checkpointer()
 
 
 app = FastAPI(lifespan=lifespan)
 
 app.include_router(research_router)
-
-# Mount MCP server — reachable at /tavily/mcp
-app.mount("/tavily", tavily_mcp_app)
 
 
 @app.get("/")
